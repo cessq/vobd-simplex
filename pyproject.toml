@@ -1,0 +1,6 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# m и l — обозначения со слайдов, переименовывать не стал
+ignore = ["E741"]
