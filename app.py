@@ -137,18 +137,19 @@ class App:
         self.ax_conv.set_axis_off()
         self.ax_path.text(0.5, 0.5, "задайте параметры и нажмите «Запустить»", ha="center", color="gray")
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+
+        zoom = ttk.Frame(right)
+        zoom.pack(side="bottom", fill="x", pady=(4, 0))
+        bottom = ttk.Frame(right)
+        bottom.pack(side="bottom", fill="x")
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
-        bottom = ttk.Frame(right)
-        bottom.pack(fill="x")
         self.step_text = tk.StringVar()
         ttk.Label(bottom, text="шаг").pack(side="left")
         self.slider = ttk.Scale(bottom, from_=0, to=0, command=lambda _: self.draw_path())
         self.slider.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Label(bottom, textvariable=self.step_text, width=46).pack(side="left")
 
-        zoom = ttk.Frame(right)
-        zoom.pack(fill="x", pady=(4, 0))
         ttk.Button(zoom, text="Весь путь", command=self.zoom_all).pack(side="left")
         ttk.Button(zoom, text="К текущему симплексу", command=self.zoom_simplex).pack(side="left", padx=4)
         ttk.Label(zoom, text="колесо мыши — зум, перетаскивание — сдвиг", foreground="gray").pack(side="left", padx=6)
@@ -156,6 +157,7 @@ class App:
         self.canvas.mpl_connect("button_press_event", self.on_press)
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
+        self.canvas.mpl_connect("resize_event", lambda _: self.draw_path())
 
         self.vars["preset"].trace_add("write", lambda *_: self.on_preset())
         self.vars["mapping"].trace_add("write", lambda *_: self.on_mapping())
@@ -279,13 +281,12 @@ class App:
             self.canvas.draw_idle()
             return
         ax.set_axis_on()
-        xl, yl = self.view or self.bounds(np.vstack([s["V"] for s in self.steps[: N + 1]]), 0.15)
-        ax.set_xlim(xl)
-        ax.set_ylim(yl)
-        ax.set_aspect("equal", adjustable="datalim")
-        ax.apply_aspect()
-        g1 = np.linspace(*ax.get_xlim(), 160)
-        g2 = np.linspace(*ax.get_ylim(), 160)
+        (x0, x1), (y0, y1) = self.view or self.bounds(np.vstack([s["V"] for s in self.steps[: N + 1]]), 0.15)
+        box = ax.get_window_extent()
+        k = max((x1 - x0) / box.width, (y1 - y0) / box.height) / 2
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        g1 = np.linspace(cx - k * box.width, cx + k * box.width, 160)
+        g2 = np.linspace(cy - k * box.height, cy + k * box.height, 160)
         f, _ = parse(self.expr)
         A, B = np.meshgrid(g1, g2)
         Z = f((A, B)) + np.zeros_like(A)
