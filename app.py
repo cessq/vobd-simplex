@@ -65,6 +65,8 @@ class App:
         self.expr = None
         self.task = None
         self.result = None
+        self.view = None
+        self.drag = None
 
         left = ttk.Frame(root, padding=8)
         left.pack(side="left", fill="y")
@@ -145,6 +147,16 @@ class App:
         self.slider.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Label(bottom, textvariable=self.step_text, width=46).pack(side="left")
 
+        zoom = ttk.Frame(right)
+        zoom.pack(fill="x", pady=(4, 0))
+        ttk.Button(zoom, text="Весь путь", command=self.zoom_all).pack(side="left")
+        ttk.Button(zoom, text="К текущему симплексу", command=self.zoom_simplex).pack(side="left", padx=4)
+        ttk.Label(zoom, text="колесо мыши — зум, перетаскивание — сдвиг", foreground="gray").pack(side="left", padx=6)
+        self.canvas.mpl_connect("scroll_event", self.on_scroll)
+        self.canvas.mpl_connect("button_press_event", self.on_press)
+        self.canvas.mpl_connect("motion_notify_event", self.on_motion)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
+
         self.vars["preset"].trace_add("write", lambda *_: self.on_preset())
         self.vars["mapping"].trace_add("write", lambda *_: self.on_mapping())
 
@@ -222,6 +234,7 @@ class App:
 
     def show(self, expr, steps, fx, x, stop):
         self.expr, self.steps = expr, steps
+        self.view = None
         ok = sum(1 for st in steps[1:] if st["ok"])
         self.info.set(
             f"x* = ({', '.join(f'{v:.6g}' for v in x)})\n"
@@ -266,27 +279,93 @@ class App:
             self.canvas.draw_idle()
             return
         ax.set_axis_on()
-        pts = np.vstack([s["V"] for s in self.steps[: N + 1]])
-        lo, hi = pts.min(axis=0), pts.max(axis=0)
-        pad = (hi - lo).max() * 0.15 + 1e-9
-        g1 = np.linspace(lo[0] - pad, hi[0] + pad, 160)
-        g2 = np.linspace(lo[1] - pad, hi[1] + pad, 160)
+        xl, yl = self.view or self.bounds(np.vstack([s["V"] for s in self.steps[: N + 1]]), 0.15)
+        ax.set_xlim(xl)
+        ax.set_ylim(yl)
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.apply_aspect()
+        g1 = np.linspace(*ax.get_xlim(), 160)
+        g2 = np.linspace(*ax.get_ylim(), 160)
         f, _ = parse(self.expr)
         A, B = np.meshgrid(g1, g2)
         Z = f((A, B)) + np.zeros_like(A)
-        levels = np.unique(np.quantile(Z, np.linspace(0.02, 0.98, 14)))
-        ax.contour(g1, g2, Z, levels=levels, colors="#4060c0", linewidths=0.6)
+        levels = np.unique(np.quantile(Z[np.isfinite(Z)], np.linspace(0.02, 0.98, 14)))
+        if len(levels) > 1:
+            ax.contour(g1, g2, Z, levels=levels, colors="#4060c0", linewidths=0.6)
         tris = [np.vstack([s["V"], s["V"][:1]]) for s in self.steps[: N + 1]]
         ax.add_collection(LineCollection(tris, colors="#d03030", linewidths=0.5, alpha=0.6))
         cur = np.vstack([st["V"], st["V"][:1]])
         ax.plot(cur[:, 0], cur[:, 1], color="#a00000", lw=1.8)
         c = np.array([s["center"] for s in self.steps[: N + 1]])
         ax.plot(c[:, 0], c[:, 1], ":", color="black", lw=0.8)
-        ax.set_aspect("equal", adjustable="datalim")
+        ax.set_xlim(g1[0], g1[-1])
+        ax.set_ylim(g2[0], g2[-1])
         ax.set_xlabel("x1")
         ax.set_ylabel("x2")
         ax.set_title("траектория симплексов")
         self.canvas.draw_idle()
+
+    @staticmethod
+    def bounds(pts, pad):
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        d = (hi - lo).max() * pad + 1e-12 * (1 + np.abs(lo).max())
+        return (lo[0] - d, hi[0] + d), (lo[1] - d, hi[1] + d)
+
+    def zoomable(self):
+        return len(self.steps) > 0 and len(self.steps[0]["center"]) == 2
+
+    def zoom_all(self):
+        self.view = None
+        self.draw_path()
+
+    def zoom_simplex(self):
+        if not self.zoomable():
+            return
+        st = self.steps[int(round(float(self.slider.get())))]
+        self.view = self.bounds(np.asarray(st["V"]), 1.5)
+        self.draw_path()
+
+    def on_scroll(self, e):
+        if e.inaxes is not self.ax_path or not self.zoomable():
+            return
+        k = 0.8 if e.button == "up" else 1.25
+        (x0, x1), (y0, y1) = self.ax_path.get_xlim(), self.ax_path.get_ylim()
+        if k < 1 and (x1 - x0) < 1e-10 * (1 + abs(e.xdata)):
+            return
+        self.view = (
+            (e.xdata + (x0 - e.xdata) * k, e.xdata + (x1 - e.xdata) * k),
+            (e.ydata + (y0 - e.ydata) * k, e.ydata + (y1 - e.ydata) * k),
+        )
+        self.draw_path()
+
+    def on_press(self, e):
+        if e.inaxes is not self.ax_path or not self.zoomable() or e.button != 1:
+            return
+        if e.dblclick:
+            self.zoom_all()
+            return
+        self.drag = (e.x, e.y, self.ax_path.get_xlim(), self.ax_path.get_ylim())
+
+    def on_motion(self, e):
+        if not self.drag or e.x is None:
+            return
+        px, py, xl, yl = self.drag
+        inv = self.ax_path.transData.inverted()
+        (ax0, ay0), (ax1, ay1) = inv.transform([(px, py), (e.x, e.y)])
+        dx, dy = ax1 - ax0, ay1 - ay0
+        self.ax_path.set_xlim(xl[0] - dx, xl[1] - dx)
+        self.ax_path.set_ylim(yl[0] - dy, yl[1] - dy)
+        self.canvas.draw_idle()
+
+    def on_release(self, e):
+        if not self.drag:
+            return
+        start = self.drag[2:]
+        self.drag = None
+        if (self.ax_path.get_xlim(), self.ax_path.get_ylim()) == start:
+            return
+        self.view = self.ax_path.get_xlim(), self.ax_path.get_ylim()
+        self.draw_path()
 
     def save_log(self):
         if not self.result:
